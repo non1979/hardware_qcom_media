@@ -66,7 +66,7 @@ libmm-vdec-inc          += bionic/libstdc++/include
 libmm-vdec-inc          += $(LOCAL_PATH)/inc 
 libmm-vdec-inc          += $(OMX_VIDEO_PATH)/vidc/common/inc
 libmm-vdec-inc          += hardware/qcom/media/mm-core/inc
-ifneq ($(BOARD_VENDOR),sony)
+ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
 libmm-vdec-inc          += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 #DRM include - Interface which loads the DRM library
@@ -118,7 +118,7 @@ include $(CLEAR_VARS)
 
 mm-vdec-test-inc    := hardware/qcom/media/mm-core/inc
 mm-vdec-test-inc    += $(LOCAL_PATH)/inc
-ifneq ($(BOARD_VENDOR),sony)
+ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
 mm-vdec-test-inc    += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 
@@ -144,7 +144,7 @@ include $(CLEAR_VARS)
 
 mm-vdec-drv-test-inc    := hardware/qcom/media/mm-core/inc
 mm-vdec-drv-test-inc    += $(LOCAL_PATH)/inc
-ifneq ($(BOARD_VENDOR),sony)
+ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
 mm-vdec-drv-test-inc    += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 
