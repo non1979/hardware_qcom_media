@@ -55,7 +55,7 @@ libmm-venc-inc      := bionic/libc/include
 libmm-venc-inc      += bionic/libstdc++/include
 libmm-venc-inc      += $(LOCAL_PATH)/inc
 libmm-venc-inc      += $(LOCAL_PATH)/../common/inc
-ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
+ifneq ($(BOARD_VENDOR),sony)
 libmm-venc-inc      += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 libmm-venc-inc      += $(OMX_VIDEO_PATH)/vidc/common/inc
@@ -106,7 +106,7 @@ endif
 
 mm-venc-test720p-inc            := $(TARGET_OUT_HEADERS)/mm-core
 mm-venc-test720p-inc            += $(LOCAL_PATH)/inc
-ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
+ifneq ($(BOARD_VENDOR),sony)
 mm-venc-test720p-inc            += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 mm-venc-test720p-inc            += $(OMX_VIDEO_PATH)/vidc/common/inc
@@ -136,7 +136,7 @@ include $(BUILD_EXECUTABLE)
 include $(CLEAR_VARS)
 
 venc-test-inc                   += $(LOCAL_PATH)/inc
-ifneq ($(TARGET_USES_ACTUAL_KERNEL_INCLUDES),true)
+ifneq ($(BOARD_VENDOR),sony)
 venc-test-inc                   += $(TARGET_OUT_INTERMEDIATES)/KERNEL_OBJ/usr/include
 endif
 
