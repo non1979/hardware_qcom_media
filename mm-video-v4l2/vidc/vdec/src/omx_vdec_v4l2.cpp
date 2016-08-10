@@ -649,6 +649,9 @@ omx_vdec::omx_vdec(): m_error_propogated(false),
     prev_ts_actual(LLONG_MAX),
     rst_prev_ts(true),
     frm_int(0),
+    m_fps_received(0),
+    m_fps_prev(0),
+    m_drc_enable(0),
     in_reconfig(false),
     m_display_id(NULL),
     client_extradata(0),
@@ -690,8 +693,8 @@ omx_vdec::omx_vdec(): m_error_propogated(false),
     if (perf_flag) {
         DEBUG_PRINT_HIGH("vidc.dec.debug.perf is %d", perf_flag);
         dec_time.start();
-        proc_frms = latency = 0;
     }
+    proc_frms = latency = 0;
     prev_n_filled_len = 0;
     property_value[0] = '\0';
     property_get("vidc.dec.debug.ts", property_value, "0");
@@ -744,6 +747,13 @@ omx_vdec::omx_vdec(): m_error_propogated(false),
     property_get("vidc.dec.debug.dyn.disabled", property_value, "0");
     m_disable_dynamic_buf_mode = atoi(property_value);
     DEBUG_PRINT_HIGH("vidc.dec.debug.dyn.disabled value is %d",m_disable_dynamic_buf_mode);
+
+    property_value[0] = '\0';
+    property_get("media.drc_enable", property_value, "0");
+    if (atoi(property_value)) {
+        m_drc_enable = true;
+        DEBUG_PRINT_HIGH("DRC enabled");
+    }
 
 #ifdef _UBWC_
     property_value[0] = '\0';
@@ -4081,6 +4091,7 @@ OMX_ERRORTYPE  omx_vdec::set_parameter(OMX_IN OMX_HANDLETYPE     hComp,
                                        // Frame rate only should be set if this is a "known value" or to
                                        // activate ts prediction logic (arbitrary mode only) sending input
                                        // timestamps with max value (LLONG_MAX).
+                                       m_fps_received = portDefn->format.video.xFramerate;
                                        DEBUG_PRINT_HIGH("set_parameter: frame rate set by omx client : %u",
                                                (unsigned int)portDefn->format.video.xFramerate >> 16);
                                        Q16ToFraction(portDefn->format.video.xFramerate, drv_ctx.frame_rate.fps_numerator,
@@ -5227,7 +5238,9 @@ OMX_ERRORTYPE  omx_vdec::set_config(OMX_IN OMX_HANDLETYPE      hComp,
 
         if (config->nPortIndex == OMX_CORE_INPUT_PORT_INDEX) {
             if (config->bEnabled) {
-                if ((config->nFps >> 16) > 0) {
+                if ((config->nFps >> 16) > 0 &&
+                        (config->nFps >> 16) <= MAX_SUPPORTED_FPS) {
+                    m_fps_received = config->nFps;
                     DEBUG_PRINT_HIGH("set_config: frame rate set by omx client : %u",
                             (unsigned int)config->nFps >> 16);
                     Q16ToFraction(config->nFps, drv_ctx.frame_rate.fps_numerator,
@@ -8156,15 +8169,15 @@ OMX_ERRORTYPE omx_vdec::fill_buffer_done(OMX_HANDLETYPE hComp,
             else
                 set_frame_rate(buffer->nTimeStamp);
 
+            proc_frms++;
             if (perf_flag) {
-                if (!proc_frms) {
+                if (1 == proc_frms) {
                     dec_time.stop();
                     latency = dec_time.processing_time_us() - latency;
                     DEBUG_PRINT_HIGH(">>> FBD Metrics: Latency(%.2f)mS", latency / 1e3);
                     dec_time.start();
                     fps_metrics.start();
                 }
-                proc_frms++;
                 if (buffer->nFlags & OMX_BUFFERFLAG_EOS) {
                     OMX_U64 proc_time = 0;
                     fps_metrics.stop();
@@ -8172,13 +8185,13 @@ OMX_ERRORTYPE omx_vdec::fill_buffer_done(OMX_HANDLETYPE hComp,
                     DEBUG_PRINT_HIGH(">>> FBD Metrics: proc_frms(%u) proc_time(%.2f)S fps(%.2f)",
                             (unsigned int)proc_frms, (float)proc_time / 1e6,
                             (float)(1e6 * proc_frms) / proc_time);
-                    proc_frms = 0;
                 }
             }
         }
         if (buffer->nFlags & OMX_BUFFERFLAG_EOS) {
             prev_ts = LLONG_MAX;
             rst_prev_ts = true;
+            proc_frms = 0;
         }
 
         pPMEMInfo = (OMX_QCOM_PLATFORM_PRIVATE_PMEM_INFO *)
@@ -8221,10 +8234,31 @@ OMX_ERRORTYPE omx_vdec::fill_buffer_done(OMX_HANDLETYPE hComp,
         }
 
         // add current framerate to gralloc meta data
-        if (m_enable_android_native_buffers && m_out_mem_ptr) {
+        if (buffer->nFilledLen > 0 && m_enable_android_native_buffers && m_out_mem_ptr) {
+            //If valid fps was received, directly send it to display for the 1st fbd.
+            //Otherwise, calculate fps using fbd timestamps,
+            //  when received 2 fbds, send a coarse fps,
+            //  when received 30 fbds, update fps again as it should be
+            //  more accurate than the one when only 2 fbds received.
+            //For other frames, set value 0 to inform that refresh rate has no update
+            float refresh_rate = m_fps_prev;
+            if (m_fps_received) {
+                if (1 == proc_frms) {
+                    refresh_rate = m_fps_received / (float)(1<<16);
+                }
+            } else {
+                if (2 == proc_frms || 30 == proc_frms) {
+                    refresh_rate = drv_ctx.frame_rate.fps_numerator / (float) drv_ctx.frame_rate.fps_denominator;
+                }
+            }
+            if (refresh_rate > 60) {
+                refresh_rate = 60;
+            }
+            DEBUG_PRINT_LOW("frc set refresh_rate %f, frame %d", refresh_rate, proc_frms);
             OMX_U32 buf_index = buffer - m_out_mem_ptr;
             setMetaData((private_handle_t *)native_buffer[buf_index].privatehandle,
-                         UPDATE_REFRESH_RATE, (void*)&current_framerate);
+                         UPDATE_REFRESH_RATE, (void*)&refresh_rate);
+            m_fps_prev = refresh_rate;
         }
 
         if (buffer->nFilledLen && m_enable_android_native_buffers && m_out_mem_ptr) {
@@ -8235,7 +8269,7 @@ OMX_ERRORTYPE omx_vdec::fill_buffer_done(OMX_HANDLETYPE hComp,
         }
 
         if (il_buffer) {
-            log_output_buffers(il_buffer);
+            log_output_buffers(buffer);
             if (dynamic_buf_mode) {
                 unsigned int nPortIndex = 0;
                 nPortIndex = buffer-((OMX_BUFFERHEADERTYPE *)client_buffers.get_il_buf_hdr());
@@ -9591,12 +9625,31 @@ OMX_ERRORTYPE omx_vdec::get_buffer_req(vdec_allocatorproperty *buffer_prop)
         fmt.type =V4L2_BUF_TYPE_VIDEO_OUTPUT_MPLANE;
         fmt.fmt.pix_mp.pixelformat = output_capability;
     } else if (buffer_prop->buffer_type == VDEC_BUFFER_TYPE_OUTPUT) {
-        bufreq.type=V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
-        fmt.type =V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        bufreq.type= V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+        fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
         fmt.fmt.pix_mp.pixelformat = capture_capability;
     } else {
         eRet = OMX_ErrorBadParameter;
     }
+
+    if (buffer_prop->buffer_type == VDEC_BUFFER_TYPE_OUTPUT && in_reconfig) {
+        //Do G_FMT here to ensure that capture port resolution is updated using
+        //reconfig wxh as in split mode capture port has default resolution till
+        //reconfig and if not updated, the buffer requirement will not include DCVS
+        //extra buffer count
+        if (eRet==OMX_ErrorNone) {
+            fmt.fmt.pix_mp.height = drv_ctx.video_resolution.frame_height;
+            fmt.fmt.pix_mp.width = drv_ctx.video_resolution.frame_width;
+            ret = ioctl(drv_ctx.video_driver_fd, VIDIOC_G_FMT, &fmt);
+        }
+        if (ret) {
+            DEBUG_PRINT_ERROR("Requesting buffer requirements failed");
+            /*TODO: How to handle this case */
+            eRet = OMX_ErrorInsufficientResources;
+            return eRet;
+        }
+    }
+
     if (eRet==OMX_ErrorNone) {
         ret = ioctl(drv_ctx.video_driver_fd,VIDIOC_REQBUFS, &bufreq);
     }
@@ -9794,13 +9847,6 @@ OMX_ERRORTYPE omx_vdec::update_portdef(OMX_PARAM_PORTDEFINITIONTYPE *portDefn)
     portDefn->nVersion.nVersion = OMX_SPEC_VERSION;
     portDefn->nSize = sizeof(OMX_PARAM_PORTDEFINITIONTYPE);
     portDefn->eDomain    = OMX_PortDomainVideo;
-    if (drv_ctx.frame_rate.fps_denominator > 0)
-        portDefn->format.video.xFramerate = (drv_ctx.frame_rate.fps_numerator /
-            drv_ctx.frame_rate.fps_denominator) << 16; //Q16 format
-    else {
-        DEBUG_PRINT_ERROR("Error: Divide by zero");
-        return OMX_ErrorBadParameter;
-    }
     memset(&fmt, 0x0, sizeof(struct v4l2_format));
     if (0 == portDefn->nPortIndex) {
         portDefn->eDir =  OMX_DirInput;
@@ -9809,6 +9855,9 @@ OMX_ERRORTYPE omx_vdec::update_portdef(OMX_PARAM_PORTDEFINITIONTYPE *portDefn)
         portDefn->nBufferSize        = drv_ctx.ip_buf.buffer_size;
         portDefn->format.video.eColorFormat = OMX_COLOR_FormatUnused;
         portDefn->format.video.eCompressionFormat = eCompressionFormat;
+        //for input port, always report the fps value set by client,
+        //to distinguish whether client got valid fps from parser.
+        portDefn->format.video.xFramerate = m_fps_received;
         portDefn->bEnabled   = m_inp_bEnabled;
         portDefn->bPopulated = m_inp_bPopulated;
 
@@ -9842,6 +9891,13 @@ OMX_ERRORTYPE omx_vdec::update_portdef(OMX_PARAM_PORTDEFINITIONTYPE *portDefn)
         portDefn->nBufferCountActual = drv_ctx.op_buf.actualcount;
         portDefn->nBufferCountMin    = drv_ctx.op_buf.mincount;
         portDefn->format.video.eCompressionFormat = OMX_VIDEO_CodingUnused;
+        if (drv_ctx.frame_rate.fps_denominator > 0)
+            portDefn->format.video.xFramerate = (drv_ctx.frame_rate.fps_numerator /
+                drv_ctx.frame_rate.fps_denominator) << 16; //Q16 format
+        else {
+            DEBUG_PRINT_ERROR("Error: Divide by zero");
+            return OMX_ErrorBadParameter;
+        }
         portDefn->bEnabled   = m_out_bEnabled;
         portDefn->bPopulated = m_out_bPopulated;
         if (!client_buffers.get_color_format(portDefn->format.video.eColorFormat)) {
@@ -10182,7 +10238,7 @@ void omx_vdec::handle_extradata(OMX_BUFFERHEADERTYPE *p_buf_hdr)
     unsigned long consumed_len = 0;
     OMX_U32 num_MB_in_frame;
     OMX_U32 recovery_sei_flags = 1;
-    int enable = 0;
+    int enable = OMX_InterlaceFrameProgressive;
 
 
     m_extradata_info.output_crop_updated = OMX_FALSE;
@@ -10249,21 +10305,22 @@ void omx_vdec::handle_extradata(OMX_BUFFERHEADERTYPE *p_buf_hdr)
                     OMX_U32 interlace_color_format;
                     payload = (struct msm_vidc_interlace_payload *)(void *)data->data;
                     if (payload) {
-                        enable = 1;
+                        enable = OMX_InterlaceFrameProgressive;
                         switch (payload->format) {
                             case MSM_VIDC_INTERLACE_FRAME_PROGRESSIVE:
                                 drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
-                                enable = 0;
                                 break;
                             case MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_TOPFIELDFIRST:
                                 drv_ctx.interlace = VDEC_InterlaceInterleaveFrameTopFieldFirst;
+                                enable = OMX_InterlaceInterleaveFrameTopFieldFirst;
                                 break;
                             case MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_BOTTOMFIELDFIRST:
                                 drv_ctx.interlace = VDEC_InterlaceInterleaveFrameBottomFieldFirst;
+                                enable = OMX_InterlaceInterleaveFrameBottomFieldFirst;
                                 break;
                             default:
-                                DEBUG_PRINT_LOW("default case - set interlace to topfield");
-                                drv_ctx.interlace = VDEC_InterlaceInterleaveFrameTopFieldFirst;
+                                DEBUG_PRINT_LOW("default case - set to progressive");
+                                drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
                         }
                         switch (payload->color_format) {
                            case MSM_VIDC_HAL_INTERLACE_COLOR_FORMAT_NV12:
@@ -10294,8 +10351,7 @@ void omx_vdec::handle_extradata(OMX_BUFFERHEADERTYPE *p_buf_hdr)
                         }
                     }
                     if (client_extradata & OMX_INTERLACE_EXTRADATA) {
-                        append_interlace_extradata(p_extra, payload->format,
-                                      p_buf_hdr->nFlags & QOMX_VIDEO_BUFFERFLAG_MBAFF);
+                        append_interlace_extradata(p_extra, payload->format);
                         p_extra = (OMX_OTHER_EXTRADATATYPE *) (((OMX_U8 *) p_extra) + p_extra->nSize);
                     }
                     break;
@@ -10774,7 +10830,7 @@ void omx_vdec::print_debug_extradata(OMX_OTHER_EXTRADATATYPE *extra)
 }
 
 void omx_vdec::append_interlace_extradata(OMX_OTHER_EXTRADATATYPE *extra,
-        OMX_U32 interlaced_format_type, bool is_mbaff)
+        OMX_U32 interlaced_format_type)
 {
     OMX_STREAMINTERLACEFORMAT *interlace_format;
 
@@ -10795,22 +10851,23 @@ void omx_vdec::append_interlace_extradata(OMX_OTHER_EXTRADATATYPE *extra,
     interlace_format->nVersion.nVersion = OMX_SPEC_VERSION;
     interlace_format->nPortIndex = OMX_CORE_OUTPUT_PORT_INDEX;
 
-    if ((interlaced_format_type == MSM_VIDC_INTERLACE_FRAME_PROGRESSIVE) && !is_mbaff) {
+    if (interlaced_format_type == MSM_VIDC_INTERLACE_FRAME_PROGRESSIVE) {
         interlace_format->bInterlaceFormat = OMX_FALSE;
         interlace_format->nInterlaceFormats = OMX_InterlaceFrameProgressive;
         drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
-    } else if ((interlaced_format_type == MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_TOPFIELDFIRST) && !is_mbaff) {
-        interlace_format->bInterlaceFormat = OMX_TRUE;
-        interlace_format->nInterlaceFormats =  OMX_InterlaceInterleaveFrameTopFieldFirst;
-        drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
-    } else if ((interlaced_format_type == MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_BOTTOMFIELDFIRST) && !is_mbaff) {
-        interlace_format->bInterlaceFormat = OMX_TRUE;
-        interlace_format->nInterlaceFormats = OMX_InterlaceInterleaveFrameBottomFieldFirst;
-        drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
-    } else {
+    } else if (interlaced_format_type == MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_TOPFIELDFIRST) {
         interlace_format->bInterlaceFormat = OMX_TRUE;
         interlace_format->nInterlaceFormats = OMX_InterlaceInterleaveFrameTopFieldFirst;
         drv_ctx.interlace = VDEC_InterlaceInterleaveFrameTopFieldFirst;
+    } else if (interlaced_format_type == MSM_VIDC_INTERLACE_INTERLEAVE_FRAME_BOTTOMFIELDFIRST) {
+        interlace_format->bInterlaceFormat = OMX_TRUE;
+        interlace_format->nInterlaceFormats = OMX_InterlaceInterleaveFrameBottomFieldFirst;
+        drv_ctx.interlace = VDEC_InterlaceInterleaveFrameBottomFieldFirst;
+    } else {
+        //default case - set to progressive
+        interlace_format->bInterlaceFormat = OMX_FALSE;
+        interlace_format->nInterlaceFormats = OMX_InterlaceFrameProgressive;
+        drv_ctx.interlace = VDEC_InterlaceFrameProgressive;
     }
     print_debug_extradata(extra);
 }

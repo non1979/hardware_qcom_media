@@ -672,7 +672,7 @@ class omx_vdec: public qc_omx_component
         void print_debug_extradata(OMX_OTHER_EXTRADATATYPE *extra);
 #ifdef _MSM8974_
         void append_interlace_extradata(OMX_OTHER_EXTRADATATYPE *extra,
-                OMX_U32 interlaced_format_type, bool is_mbaff);
+                OMX_U32 interlaced_format_type);
         OMX_ERRORTYPE enable_extradata(OMX_U32 requested_extradata, bool is_internal,
                 bool enable = true);
         void append_frame_info_extradata(OMX_OTHER_EXTRADATATYPE *extra,
@@ -907,6 +907,9 @@ class omx_vdec: public qc_omx_component
         OMX_S64 prev_ts_actual;
         bool rst_prev_ts;
         OMX_U32 frm_int;
+        OMX_U32 m_fps_received;
+        float   m_fps_prev;
+        bool m_drc_enable;
 
         struct vdec_allocatorproperty op_buf_rcnfg;
         bool in_reconfig;
